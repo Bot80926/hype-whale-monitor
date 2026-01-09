@@ -20,7 +20,7 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { entry_price, direction, amount_usd, leverage, trigger_id } = body;
+    const { entry_price, direction, amount_usd, leverage, trigger_id, end_time } = body;
 
     if (!entry_price || !direction) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
@@ -36,6 +36,7 @@ export async function POST(req: Request) {
           leverage: leverage || 5,
           status: "OPEN",
           trigger_id: trigger_id || null, // Optional for manual trades if any
+          end_time: end_time || null,
         },
       ], { onConflict: "trigger_id", ignoreDuplicates: true })
       .select()

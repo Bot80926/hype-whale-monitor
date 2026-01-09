@@ -67,7 +67,7 @@ export default function SimulatorPage() {
   };
 
   // Open Position Helper
-  const openPosition = async (direction: "BUY" | "SELL", price: number, triggerId?: string) => {
+  const openPosition = async (direction: "BUY" | "SELL", price: number, triggerId?: string, endTime?: string) => {
     if (price <= 0) return;
     
     // Optimistic UI update? No, safer to wait DB.
@@ -84,7 +84,8 @@ export default function SimulatorPage() {
           direction,
           amount_usd: 1000,
           leverage: 5,
-          trigger_id: triggerId
+          trigger_id: triggerId,
+          end_time: endTime
         })
       });
       if (res.ok) {
@@ -97,7 +98,7 @@ export default function SimulatorPage() {
   };
 
   // Close Position Helper
-  const closePosition = async (id: string, status: "CLOSED_TP" | "CLOSED_SL", closePrice: number, pnlPercent: number) => {
+  const closePosition = async (id: string, status: "CLOSED_TP" | "CLOSED_SL" | "CLOSED_TIME", closePrice: number, pnlPercent: number) => {
      try {
       const res = await fetch("/api/simulator/positions", {
         method: "PATCH",
@@ -110,7 +111,13 @@ export default function SimulatorPage() {
         })
       });
       if (res.ok) {
-        toast(status === "CLOSED_TP" ? "See ya! Take Profit Hit 🎯" : "Ouch! Stop Loss Hit 🛑", {
+        let message = "";
+        switch(status) {
+            case "CLOSED_TP": message = "See ya! Take Profit Hit 🎯"; break;
+            case "CLOSED_SL": message = "Ouch! Stop Loss Hit 🛑"; break;
+            case "CLOSED_TIME": message = "Time's up! Order Completed ⏱️"; break;
+        }
+        toast(message, {
             description: `PnL: ${pnlPercent.toFixed(2)}%`
         });
         fetchPositions();
@@ -135,7 +142,8 @@ export default function SimulatorPage() {
                 console.log("Trigger: Backfilling/Opening Large Order", triggerId);
                 // For backfill, we use the TWAP price if it's old, otherwise currentPrice
                 const entryPrice = t.price || currentPrice;
-                openPosition(t.side, entryPrice, triggerId);
+                const endTime = t.time + (t.durationMinutes * 60 * 1000);
+                openPosition(t.side, entryPrice, triggerId, new Date(endTime).toISOString());
                 existingTriggerIds.add(triggerId); // Avoid multi-open in same loop
             }
         }
@@ -163,7 +171,9 @@ export default function SimulatorPage() {
             if (buys.length >= 10) {
                 const triggerId = `dense_${inWindow[0].id}_BUY`;
                 if (!existingTriggerIds.has(triggerId)) {
-                    openPosition("BUY", inWindow[inWindow.length - 1].price || currentPrice, triggerId);
+                    const lastTwap = inWindow[inWindow.length - 1];
+                    const endTime = lastTwap.time + (lastTwap.durationMinutes * 60 * 1000);
+                    openPosition("BUY", lastTwap.price || currentPrice, triggerId, new Date(endTime).toISOString());
                     existingTriggerIds.add(triggerId);
                     i += inWindow.length - 1; // Skip ahead
                 }
@@ -171,7 +181,9 @@ export default function SimulatorPage() {
             if (sells.length >= 10) {
                 const triggerId = `dense_${inWindow[0].id}_SELL`;
                 if (!existingTriggerIds.has(triggerId)) {
-                    openPosition("SELL", inWindow[inWindow.length - 1].price || currentPrice, triggerId);
+                    const lastTwap = inWindow[inWindow.length - 1];
+                    const endTime = lastTwap.time + (lastTwap.durationMinutes * 60 * 1000);
+                    openPosition("SELL", lastTwap.price || currentPrice, triggerId, new Date(endTime).toISOString());
                     existingTriggerIds.add(triggerId);
                     i += inWindow.length - 1; // Skip ahead
                 }
@@ -202,6 +214,13 @@ export default function SimulatorPage() {
         
         const pnlPercent = rawPnl * pos.leverage * 100;
 
+        // 1. Time-based Exit
+        if (pos.end_time && Date.now() > new Date(pos.end_time).getTime()) {
+            closePosition(pos.id, "CLOSED_TIME", hypePrice, pnlPercent);
+            return;
+        }
+
+        // 2. PnL-based Exit
         if (pnlPercent >= 20) {
             closePosition(pos.id, "CLOSED_TP", hypePrice, pnlPercent);
         } else if (pnlPercent <= -20) {
@@ -234,7 +253,8 @@ export default function SimulatorPage() {
   const closedPositions = positions.filter(p => p.status !== "OPEN");
   
   const totalOrders = positions.length;
-  const realizedPnL = closedPositions.reduce((sum, p: any) => sum + (p.pnl_percent || 0), 0);
+  const realizedPnL = closedPositions.reduce((sum, p) => sum + (p.pnl_percent || 0), 0);
+  const realizedPnlUsd = closedPositions.reduce((sum, p) => sum + (p.amount_usd * ((p.pnl_percent || 0) / 100)), 0);
   
   // Unrealized PnL Calculation
   const unrealizedPnL = activePositions.reduce((sum, pos) => {
@@ -247,7 +267,18 @@ export default function SimulatorPage() {
     return sum + (rawPnl * pos.leverage * 100);
   }, 0);
 
+  const unrealizedPnlUsd = activePositions.reduce((sum, pos) => {
+    let rawPnl = 0;
+    if (pos.direction === "BUY") {
+        rawPnl = (hypePrice - pos.entry_price) / pos.entry_price;
+    } else {
+        rawPnl = (pos.entry_price - hypePrice) / pos.entry_price;
+    }
+    return sum + (pos.amount_usd * rawPnl * pos.leverage);
+  }, 0);
+
   const totalPnL = realizedPnL + unrealizedPnL;
+  const totalProfitUsd = realizedPnlUsd + unrealizedPnlUsd;
 
   return (
     <div className="min-h-screen bg-background p-8">
@@ -282,7 +313,7 @@ export default function SimulatorPage() {
                     </div>
                 </header>
             </div>
-
+ 
             {/* Stats Overview */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                  <Card className="bg-card/50 backdrop-blur-sm border-border/40">
@@ -302,7 +333,7 @@ export default function SimulatorPage() {
                         <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wider">Unrealized PnL</p>
                     </CardContent>
                  </Card>
-
+ 
                  <Card className="bg-card/50 backdrop-blur-sm border-border/40">
                     <CardHeader className="pb-2">
                         <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
@@ -317,17 +348,20 @@ export default function SimulatorPage() {
                         <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wider">Historical Count</p>
                     </CardContent>
                  </Card>
-
+ 
                  <Card className="bg-card/50 backdrop-blur-sm border-border/40">
                     <CardHeader className="pb-2">
                         <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
                              <div className={`w-2 h-2 rounded-full ${totalPnL >= 0 ? 'bg-emerald-500' : 'bg-rose-500'} animate-pulse`}/>
-                             Total PnL
+                             Total Profit
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className={`text-2xl font-bold ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}%
+                        <div className={`text-2xl font-bold ${totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'} flex items-center justify-between`}>
+                            {totalProfitUsd >= 0 ? '+' : '-'}${Math.abs(totalProfitUsd).toFixed(2)}
+                            <span className="text-xs font-mono opacity-80">
+                                {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}%
+                            </span>
                         </div>
                         <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wider">Realized + Unrealized</p>
                     </CardContent>
@@ -351,7 +385,7 @@ export default function SimulatorPage() {
                  </Card>
             </div>
 
-            <SimulatedPositionsTable positions={positions} />
+            <SimulatedPositionsTable positions={positions} currentPrice={hypePrice} />
             
             {loading && (
                 <div className="fixed inset-0 z-[110] flex items-center justify-center bg-background/40 backdrop-blur-md animate-in fade-in duration-300">
